@@ -16,7 +16,6 @@ import android.bluetooth.le.AdvertiseSettings
 import android.bluetooth.le.BluetoothLeAdvertiser
 import android.content.Context
 import android.os.ParcelUuid
-import android.util.Log
 import java.util.UUID
 
 /**
@@ -58,21 +57,22 @@ class MoonGattServer(
     @SuppressLint("MissingPermission")
     fun start() {
         val adapter = manager.adapter ?: run {
-            Log.e(TAG, "Bluetooth unavailable")
+            DebugLog.e(TAG, "Bluetooth unavailable")
             onStateChange?.invoke("Bluetooth unavailable")
             return
         }
         if (!adapter.isEnabled) {
-            Log.e(TAG, "Bluetooth off")
+            DebugLog.e(TAG, "Bluetooth off")
             onStateChange?.invoke("Bluetooth off")
             return
         }
 
         server = manager.openGattServer(context, callback) ?: run {
-            Log.e(TAG, "openGattServer returned null")
+            DebugLog.e(TAG, "openGattServer returned null")
             onStateChange?.invoke("Could not open GATT server")
             return
         }
+        DebugLog.i(TAG, "GATT server opened")
 
         val service = BluetoothGattService(SERVICE_UUID, BluetoothGattService.SERVICE_TYPE_PRIMARY)
 
@@ -120,6 +120,10 @@ class MoonGattServer(
             .build()
 
         advertiser?.startAdvertising(settings, data, scanResponse, advertiseCallback)
+        DebugLog.i(
+            TAG,
+            "Advertising as ${adapter.name} (service=${SERVICE_UUID}, tx=${RPC_TX_UUID}, rx=${RPC_RX_UUID})"
+        )
         onStateChange?.invoke("Advertising")
     }
 
@@ -140,8 +144,9 @@ class MoonGattServer(
         for (device in subscribers.toList()) {
             try {
                 server.notifyCharacteristicChanged(device, rx, /* confirm = */ false)
+                DebugLog.d(TAG, "notify ${payload.size} bytes -> ${device.address}")
             } catch (e: SecurityException) {
-                Log.w(TAG, "notify denied for ${device.address}: ${e.message}")
+                DebugLog.w(TAG, "notify denied for ${device.address}: ${e.message}")
             }
         }
     }
@@ -150,11 +155,11 @@ class MoonGattServer(
 
     private val advertiseCallback = object : AdvertiseCallback() {
         override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
-            Log.i(TAG, "Advertising started")
+            DebugLog.i(TAG, "Advertising started (txPower=${settingsInEffect.txPowerLevel})")
         }
 
         override fun onStartFailure(errorCode: Int) {
-            Log.e(TAG, "Advertising failed: $errorCode")
+            DebugLog.e(TAG, "Advertising failed: ${describeAdvertiseError(errorCode)}")
             onStateChange?.invoke("Advertise failed ($errorCode)")
         }
     }
@@ -162,7 +167,13 @@ class MoonGattServer(
     private val callback = object : BluetoothGattServerCallback() {
         @SuppressLint("MissingPermission")
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
-            Log.i(TAG, "Conn ${device.address} status=$status state=$newState")
+            val stateStr = describeConnectionState(newState)
+            val statusStr = describeGattStatus(status)
+            val bond = describeBondState(device.bondState)
+            DebugLog.i(
+                TAG,
+                "Connection ${device.address} $stateStr (status=$statusStr, bond=$bond)"
+            )
             if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 subscribers.remove(device)
                 onStateChange?.invoke("Advertising")
@@ -182,13 +193,20 @@ class MoonGattServer(
             value: ByteArray,
         ) {
             if (characteristic.uuid == RPC_TX_UUID) {
+                DebugLog.i(
+                    TAG,
+                    "RPC_TX write ${value.size} bytes from ${device.address} " +
+                        "(first=${value.take(8).joinToString("") { "%02x".format(it) }})"
+                )
                 val reply = try {
                     onWrite(value)
                 } catch (e: Exception) {
-                    Log.e(TAG, "onWrite threw: ${e.message}", e)
+                    DebugLog.e(TAG, "onWrite threw: ${e.message}", e)
                     null
                 }
                 if (reply != null) notifySubscribers(reply)
+            } else {
+                DebugLog.d(TAG, "Unexpected write on ${characteristic.uuid}")
             }
             if (responseNeeded) {
                 server?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, null)
@@ -203,6 +221,10 @@ class MoonGattServer(
             characteristic: BluetoothGattCharacteristic,
         ) {
             val value = characteristic.value ?: ByteArray(0)
+            DebugLog.d(
+                TAG,
+                "read ${characteristic.uuid} from ${device.address} (${value.size} bytes)"
+            )
             server?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
         }
 
@@ -219,12 +241,64 @@ class MoonGattServer(
             if (descriptor.uuid == CCC_UUID) {
                 val on = value.contentEquals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
                 if (on) subscribers.add(device) else subscribers.remove(device)
-                Log.i(TAG, "Notify ${if (on) "on" else "off"} for ${device.address}")
-                onStateChange?.invoke(if (on) "Subscribed: ${device.address}" else "Connected: ${device.address}")
+                DebugLog.i(TAG, "CCCD notify=${if (on) "on" else "off"} from ${device.address}")
+                onStateChange?.invoke(
+                    if (on) "Subscribed: ${device.address}" else "Connected: ${device.address}"
+                )
+            } else {
+                DebugLog.d(TAG, "Descriptor write ${descriptor.uuid} from ${device.address}")
             }
             if (responseNeeded) {
                 server?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, null)
             }
         }
+
+        @SuppressLint("MissingPermission")
+        override fun onMtuChanged(device: BluetoothDevice, mtu: Int) {
+            DebugLog.i(TAG, "MTU changed with ${device.address}: $mtu")
+        }
+
+        override fun onNotificationSent(device: BluetoothDevice, status: Int) {
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                DebugLog.w(TAG, "notify to ${device.address} delivered status=$status")
+            }
+        }
+    }
+
+    private fun describeConnectionState(state: Int) = when (state) {
+        BluetoothProfile.STATE_CONNECTED -> "CONNECTED"
+        BluetoothProfile.STATE_CONNECTING -> "CONNECTING"
+        BluetoothProfile.STATE_DISCONNECTED -> "DISCONNECTED"
+        BluetoothProfile.STATE_DISCONNECTING -> "DISCONNECTING"
+        else -> "state=$state"
+    }
+
+    private fun describeBondState(state: Int) = when (state) {
+        BluetoothDevice.BOND_NONE -> "NONE"
+        BluetoothDevice.BOND_BONDING -> "BONDING"
+        BluetoothDevice.BOND_BONDED -> "BONDED"
+        else -> "bond=$state"
+    }
+
+    // Common BluetoothGatt status codes we see on disconnect.
+    private fun describeGattStatus(status: Int) = when (status) {
+        0 -> "SUCCESS"
+        8 -> "CONN_TIMEOUT"
+        19 -> "PEER_USER"           // peer disconnected
+        22 -> "LOCAL_HOST"          // we disconnected
+        34 -> "INSUFFICIENT_ENCRYPT"
+        62 -> "CONN_FAIL_ESTABLISH"
+        133 -> "GATT_ERROR(133)"
+        137 -> "INSUFFICIENT_AUTH"
+        else -> "status=$status"
+    }
+
+    private fun describeAdvertiseError(code: Int) = when (code) {
+        AdvertiseCallback.ADVERTISE_FAILED_ALREADY_STARTED -> "ALREADY_STARTED"
+        AdvertiseCallback.ADVERTISE_FAILED_DATA_TOO_LARGE -> "DATA_TOO_LARGE"
+        AdvertiseCallback.ADVERTISE_FAILED_FEATURE_UNSUPPORTED -> "FEATURE_UNSUPPORTED"
+        AdvertiseCallback.ADVERTISE_FAILED_INTERNAL_ERROR -> "INTERNAL_ERROR"
+        AdvertiseCallback.ADVERTISE_FAILED_TOO_MANY_ADVERTISERS -> "TOO_MANY_ADVERTISERS"
+        else -> "code=$code"
     }
 }

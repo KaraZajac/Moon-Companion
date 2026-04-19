@@ -9,4 +9,8 @@
     <string name="start_at_boot">Start at device boot</string>
     <string name="disable_battery_opt">Allow background run</string>
     <string name="battery_opt_already_granted">Already running unthrottled</string>
+    <string name="log_label">Debug log</string>
+    <string name="copy_logs">Copy</string>
+    <string name="clear_logs">Clear</string>
+    <string name="logs_copied">Log copied</string>
 </resources>

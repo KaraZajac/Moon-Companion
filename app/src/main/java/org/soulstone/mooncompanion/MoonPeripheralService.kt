@@ -11,7 +11,6 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
-import android.util.Log
 
 /**
  * Foreground service that owns the peripheral lifetime. The UI lives in an
@@ -55,7 +54,7 @@ class MoonPeripheralService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        Log.i(TAG, "onCreate")
+        DebugLog.i(TAG, "onCreate")
         ensureNotificationChannel()
         startForeground(NOTIFICATION_ID, buildForegroundNotification("Starting..."))
 

@@ -2,6 +2,8 @@ package org.soulstone.mooncompanion
 
 import android.Manifest
 import android.content.BroadcastReceiver
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -11,6 +13,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import org.soulstone.mooncompanion.databinding.ActivityMainBinding
@@ -57,6 +60,9 @@ class MainActivity : AppCompatActivity() {
 
         binding.batteryButton.setOnClickListener { requestBatteryOptimisationExemption() }
 
+        binding.copyLogsButton.setOnClickListener { copyLogsToClipboard() }
+        binding.clearLogsButton.setOnClickListener { DebugLog.clear() }
+
         setStatus("Idle")
     }
 
@@ -70,11 +76,29 @@ class MainActivity : AppCompatActivity() {
             registerReceiver(statusReceiver, filter)
         }
         refreshBatteryButton()
+        DebugLog.addListener(logListener)
     }
 
     override fun onStop() {
         super.onStop()
+        DebugLog.removeListener(logListener)
         try { unregisterReceiver(statusReceiver) } catch (_: IllegalArgumentException) {}
+    }
+
+    // Lives as a field so addListener / removeListener see the same instance.
+    private val logListener: (List<String>) -> Unit = { entries ->
+        runOnUiThread {
+            binding.logText.text = entries.joinToString("\n")
+            // Auto-scroll to the newest line whenever entries come in.
+            binding.logScroll.post { binding.logScroll.fullScroll(android.view.View.FOCUS_DOWN) }
+        }
+    }
+
+    private fun copyLogsToClipboard() {
+        val snapshot = DebugLog.snapshot().joinToString("\n")
+        val cm = getSystemService(ClipboardManager::class.java)
+        cm.setPrimaryClip(ClipData.newPlainText("Moon Companion log", snapshot))
+        Toast.makeText(this, R.string.logs_copied, Toast.LENGTH_SHORT).show()
     }
 
     private fun requestPermissionsAndStart() {
