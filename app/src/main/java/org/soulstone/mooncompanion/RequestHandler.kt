@@ -3,6 +3,7 @@ package org.soulstone.mooncompanion
 import android.location.Location
 import com.google.protobuf.ByteString
 import com.google.protobuf.InvalidProtocolBufferException
+import org.soulstone.mooncompanion.proto.BulkKind
 import org.soulstone.mooncompanion.proto.FixQuality
 import org.soulstone.mooncompanion.proto.MoonEvent
 import org.soulstone.mooncompanion.proto.MoonPhoneMessage
@@ -10,6 +11,7 @@ import org.soulstone.mooncompanion.proto.MoonRequest
 import org.soulstone.mooncompanion.proto.MoonResponse
 import org.soulstone.mooncompanion.proto.MoonStatus
 import org.soulstone.mooncompanion.proto.NotificationAck
+import org.soulstone.mooncompanion.proto.OpenBulkChannelResponse
 import org.soulstone.mooncompanion.proto.PairResponse
 import org.soulstone.mooncompanion.proto.PositionData
 import org.soulstone.mooncompanion.proto.TimeData
@@ -28,6 +30,7 @@ import java.util.TimeZone
 class RequestHandler(
     private val state: PhoneState,
     private val locations: LocationProvider,
+    private val bulk: BulkChannelServer,
 ) {
 
     /** How old a fix is allowed to be before we treat it as "no fix". */
@@ -69,11 +72,13 @@ class RequestHandler(
         if (unauth != null) return unauth
 
         return when (req.payloadCase) {
-            MoonRequest.PayloadCase.GET_POSITION       -> handleGetPosition(req)
-            MoonRequest.PayloadCase.SUBSCRIBE_POSITION -> handleSubscribePosition(req)
+            MoonRequest.PayloadCase.GET_POSITION         -> handleGetPosition(req)
+            MoonRequest.PayloadCase.SUBSCRIBE_POSITION   -> handleSubscribePosition(req)
             MoonRequest.PayloadCase.UNSUBSCRIBE_POSITION -> handleUnsubscribePosition(req)
-            MoonRequest.PayloadCase.GET_TIME           -> handleGetTime(req)
-            MoonRequest.PayloadCase.SEND_NOTIFICATION  -> handleSendNotification(req)
+            MoonRequest.PayloadCase.GET_TIME             -> handleGetTime(req)
+            MoonRequest.PayloadCase.SEND_NOTIFICATION    -> handleSendNotification(req)
+            MoonRequest.PayloadCase.OPEN_BULK_CHANNEL    -> handleOpenBulkChannel(req)
+            MoonRequest.PayloadCase.CLOSE_BULK_CHANNEL   -> handleCloseBulkChannel(req)
             else -> MoonResponse.newBuilder()
                 .setRequestId(req.requestId)
                 .setStatus(MoonStatus.MOON_UNSUPPORTED_REQUEST)
@@ -145,6 +150,48 @@ class RequestHandler(
                     .setTzOffsetSeconds(tz.getOffset(now) / 1000)
                     .setTzName(tz.id)
             )
+            .build()
+    }
+
+    private fun handleOpenBulkChannel(req: MoonRequest): MoonResponse {
+        val r = req.openBulkChannel
+        val psm = bulk.psm
+        if (psm <= 0) {
+            DebugLog.w(TAG, "OpenBulkChannel: server socket not ready")
+            return MoonResponse.newBuilder()
+                .setRequestId(req.requestId)
+                .setStatus(MoonStatus.MOON_NOT_AVAILABLE)
+                .build()
+        }
+        val kind = when (r.kind) {
+            BulkKind.BULK_DOWNLOAD_FAP    -> BulkChannelServer.BulkKindLocal.DOWNLOAD_FAP
+            BulkKind.BULK_UPLOAD_FILE     -> BulkChannelServer.BulkKindLocal.UPLOAD_FILE
+            BulkKind.BULK_FIRMWARE_UPDATE -> BulkChannelServer.BulkKindLocal.FIRMWARE_UPDATE
+            BulkKind.BULK_ECHO_TEST       -> BulkChannelServer.BulkKindLocal.ECHO_TEST
+            else                          -> BulkChannelServer.BulkKindLocal.UNSPECIFIED
+        }
+        val session = bulk.beginSession(kind, r.name ?: "")
+        DebugLog.i(
+            TAG,
+            "Open bulk channel: kind=$kind name=${r.name} -> psm=$psm, bytes=${session.totalBytes}"
+        )
+        return MoonResponse.newBuilder()
+            .setRequestId(req.requestId)
+            .setStatus(MoonStatus.MOON_OK)
+            .setOpenBulkChannel(
+                OpenBulkChannelResponse.newBuilder()
+                    .setSpsm(psm)
+                    .setTotalBytes(session.totalBytes)
+                    .setSessionId(ByteString.copyFrom(session.sessionId))
+            )
+            .build()
+    }
+
+    private fun handleCloseBulkChannel(req: MoonRequest): MoonResponse {
+        bulk.cancelSession(req.closeBulkChannel.sessionId.toByteArray())
+        return MoonResponse.newBuilder()
+            .setRequestId(req.requestId)
+            .setStatus(MoonStatus.MOON_OK)
             .build()
     }
 
