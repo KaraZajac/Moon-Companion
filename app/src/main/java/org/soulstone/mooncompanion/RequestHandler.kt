@@ -1,5 +1,6 @@
 package org.soulstone.mooncompanion
 
+import android.location.Location
 import android.util.Log
 import com.google.protobuf.ByteString
 import com.google.protobuf.InvalidProtocolBufferException
@@ -16,16 +17,22 @@ import org.soulstone.mooncompanion.proto.TimeData
 import java.util.TimeZone
 
 /**
- * Mirrors scripts/moon_phone_emulator/moon_phone.py on the Flipper-firmware
- * side. Parses an RPC_TX write, dispatches it, and returns a serialized
- * MoonPhoneMessage to notify back on RPC_RX. Returns null when the inbound
- * frame is junk and there's nothing worth replying with.
+ * Parses an RPC_TX write from the Flipper, dispatches it, and returns a
+ * serialized MoonPhoneMessage to notify back on RPC_RX. Returns null when
+ * the inbound frame is junk and there's nothing worth replying with.
+ *
+ * GPS comes from FusedLocationProviderClient via the injected LocationProvider.
+ * If no fix is available yet (indoors, permission denied, airplane mode)
+ * position-related responses come back as MOON_NOT_AVAILABLE rather than
+ * fabricating coordinates — the Flipper side decides how to show that.
  */
-class RequestHandler(private val state: PhoneState) {
+class RequestHandler(
+    private val state: PhoneState,
+    private val locations: LocationProvider,
+) {
 
-    /** Drops the latitude slightly each tick so visual tests show motion. */
-    private val startLatE7 = 407395680       // 40.739568 N — Flatiron
-    private val startLonE7 = -739909780      // -73.990978 E
+    /** How old a fix is allowed to be before we treat it as "no fix". */
+    private val maxFixAgeMs: Long = 30_000L
 
     fun onRpcTxWrite(payload: ByteArray): ByteArray? {
         val request = try {
@@ -41,11 +48,15 @@ class RequestHandler(private val state: PhoneState) {
         return envelope.toByteArray()
     }
 
-    fun buildPositionEvent(): ByteArray {
+    /**
+     * Build a position event to push to subscribers. Returns null when we
+     * have no usable fix yet — the service loop should skip this tick
+     * rather than spam the Flipper with NOT_AVAILABLE events.
+     */
+    fun buildPositionEvent(): ByteArray? {
+        val position = currentPositionOrNull() ?: return null
         state.positionTick += 1
-        val event = MoonEvent.newBuilder()
-            .setPositionUpdate(makePosition(state.positionTick))
-            .build()
+        val event = MoonEvent.newBuilder().setPositionUpdate(position).build()
         return MoonPhoneMessage.newBuilder().setEvent(event).build().toByteArray()
     }
 
@@ -95,11 +106,13 @@ class RequestHandler(private val state: PhoneState) {
     }
 
     private fun handleGetPosition(req: MoonRequest): MoonResponse {
-        return MoonResponse.newBuilder()
-            .setRequestId(req.requestId)
-            .setStatus(MoonStatus.MOON_OK)
-            .setPosition(makePosition(state.positionTick))
-            .build()
+        val position = currentPositionOrNull()
+        val builder = MoonResponse.newBuilder().setRequestId(req.requestId)
+        return if (position != null) {
+            builder.setStatus(MoonStatus.MOON_OK).setPosition(position).build()
+        } else {
+            builder.setStatus(MoonStatus.MOON_NOT_AVAILABLE).build()
+        }
     }
 
     private fun handleSubscribePosition(req: MoonRequest): MoonResponse {
@@ -147,19 +160,38 @@ class RequestHandler(private val state: PhoneState) {
             .build()
     }
 
-    private fun makePosition(tick: Int): PositionData =
-        PositionData.newBuilder()
-            .setLatE7(startLatE7 + tick * 50)        // ~5mm drift per tick
-            .setLonE7(startLonE7 + tick * 30)
-            .setAltMm(15_000)
-            .setAccuracyMm(2_500)
-            .setSpeedMmps(1_200)
-            .setHeadingCdeg(tick * 18 % 36_000)
-            .setTimestampMs(System.currentTimeMillis())
-            .setFixQuality(FixQuality.FIX_3D)
-            .setSatellites(9)
+    private fun currentPositionOrNull(): PositionData? {
+        val fix = locations.current() ?: return null
+        val ageMs = System.currentTimeMillis() - fix.time
+        if (ageMs > maxFixAgeMs) {
+            Log.d(TAG, "Skipping stale fix (age=${ageMs}ms)")
+            return null
+        }
+        return toProto(fix)
+    }
+
+    private fun toProto(fix: Location): PositionData {
+        val builder = PositionData.newBuilder()
+            .setLatE7((fix.latitude * 1e7).toInt())
+            .setLonE7((fix.longitude * 1e7).toInt())
+            .setAccuracyMm((fix.accuracy * 1_000f).toInt())
+            .setSpeedMmps((fix.speed * 1_000f).toInt())
+            .setTimestampMs(fix.time)
             .setSourceId(ByteString.copyFromUtf8("android1"))
-            .build()
+
+        // Optional fields — only populate when the platform gave us a value.
+        if (fix.hasAltitude()) {
+            builder.setAltMm((fix.altitude * 1_000.0).toInt())
+            builder.setFixQuality(FixQuality.FIX_3D)
+        } else {
+            builder.setFixQuality(FixQuality.FIX_2D)
+        }
+        if (fix.hasBearing()) {
+            // Bearing is 0-360 degrees; proto wants 0-35999 centidegrees.
+            builder.setHeadingCdeg(((fix.bearing * 100f).toInt() % 36_000))
+        }
+        return builder.build()
+    }
 
     companion object {
         private const val TAG = "MoonHandler"

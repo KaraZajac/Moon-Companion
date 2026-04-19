@@ -81,6 +81,11 @@ class MainActivity : AppCompatActivity() {
             perms += Manifest.permission.BLUETOOTH_ADVERTISE
             perms += Manifest.permission.BLUETOOTH_CONNECT
         }
+        // Foreground-only location. Background location (needed if you want
+        // fixes while the app is swipe-killed) requires a separate settings
+        // grant the user has to do manually — not worth the UX cost until
+        // the Flipper actually relies on swipe-killed streaming.
+        perms += Manifest.permission.ACCESS_FINE_LOCATION
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             perms += Manifest.permission.POST_NOTIFICATIONS
         }

@@ -18,10 +18,14 @@
     <!-- Foreground service, required to keep advertising while screen off. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
-    <!-- Optional. We publish mock GPS now; real FusedLocationProvider wiring
-         comes with the Position milestone and will add ACCESS_FINE_LOCATION. -->
+    <!-- Location: needed so we can stream real fixes from
+         FusedLocationProviderClient back to the Flipper. Coarse is implied
+         by fine but Android still wants both declared for pre-S devices. -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
     <application
         android:allowBackup="true"
@@ -45,6 +49,6 @@
         <service
             android:name=".MoonPeripheralService"
             android:exported="false"
-            android:foregroundServiceType="connectedDevice" />
+            android:foregroundServiceType="connectedDevice|location" />
     </application>
 </manifest>
