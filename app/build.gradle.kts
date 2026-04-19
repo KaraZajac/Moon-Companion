@@ -40,14 +40,6 @@ android {
     buildFeatures {
         viewBinding = true
     }
-
-    sourceSets {
-        getByName("main") {
-            proto {
-                srcDir("src/main/proto")
-            }
-        }
-    }
 }
 
 dependencies {
