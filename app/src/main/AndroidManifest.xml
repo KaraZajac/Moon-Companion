@@ -27,6 +27,16 @@
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
+    <!-- Auto-restart on reboot so the user doesn't have to open the app
+         after every power cycle. The BootReceiver below only fires if the
+         user opted in via the Start-at-boot toggle. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <!-- Normal-category; lets us open the system "ignore battery
+         optimizations" prompt with our package pre-selected. Without this,
+         Doze eventually throttles BLE advertising + location updates. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
@@ -50,5 +60,16 @@
             android:name=".MoonPeripheralService"
             android:exported="false"
             android:foregroundServiceType="connectedDevice|location" />
+
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="true"
+            android:enabled="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

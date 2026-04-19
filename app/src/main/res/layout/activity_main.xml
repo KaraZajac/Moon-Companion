@@ -63,4 +63,22 @@
         app:layout_constraintTop_toTopOf="@id/startButton"
         app:layout_constraintStart_toEndOf="@id/startButton" />
 
+    <com.google.android.material.materialswitch.MaterialSwitch
+        android:id="@+id/startAtBootSwitch"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="32dp"
+        android:text="@string/start_at_boot"
+        app:layout_constraintTop_toBottomOf="@id/startButton"
+        app:layout_constraintStart_toStartOf="parent" />
+
+    <Button
+        android:id="@+id/batteryButton"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:text="@string/disable_battery_opt"
+        app:layout_constraintTop_toBottomOf="@id/startAtBootSwitch"
+        app:layout_constraintStart_toStartOf="parent" />
+
 </androidx.constraintlayout.widget.ConstraintLayout>

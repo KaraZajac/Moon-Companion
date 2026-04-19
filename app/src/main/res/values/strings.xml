@@ -6,4 +6,7 @@
     <string name="status_idle">Idle</string>
     <string name="start_advertising">Start advertising</string>
     <string name="stop">Stop</string>
+    <string name="start_at_boot">Start at device boot</string>
+    <string name="disable_battery_opt">Allow background run</string>
+    <string name="battery_opt_already_granted">Already running unthrottled</string>
 </resources>

@@ -6,16 +6,19 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import org.soulstone.mooncompanion.databinding.ActivityMainBinding
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
+    private lateinit var prefs: Preferences
 
     private val permissionLauncher = registerForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
@@ -39,12 +42,21 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
+        prefs = Preferences(this)
 
         binding.startButton.setOnClickListener { requestPermissionsAndStart() }
         binding.stopButton.setOnClickListener {
             MoonPeripheralService.stop(this)
             setStatus("Stopped")
         }
+
+        binding.startAtBootSwitch.isChecked = prefs.startAtBoot
+        binding.startAtBootSwitch.setOnCheckedChangeListener { _, checked ->
+            prefs.startAtBoot = checked
+        }
+
+        binding.batteryButton.setOnClickListener { requestBatteryOptimisationExemption() }
+
         setStatus("Idle")
     }
 
@@ -57,6 +69,7 @@ class MainActivity : AppCompatActivity() {
             @Suppress("UnspecifiedRegisterReceiverFlag")
             registerReceiver(statusReceiver, filter)
         }
+        refreshBatteryButton()
     }
 
     override fun onStop() {
@@ -95,6 +108,41 @@ class MainActivity : AppCompatActivity() {
     private fun startPeripheral() {
         MoonPeripheralService.start(this)
         setStatus("Starting...")
+    }
+
+    /**
+     * Fire the system Settings intent that opens the per-app battery
+     * optimisation list with our package pre-selected. Google Play policy
+     * frowns on this for general apps; fine for a companion app whose
+     * whole job is persistent BLE. User still has to confirm — we can't
+     * flip the bit silently.
+     */
+    private fun requestBatteryOptimisationExemption() {
+        val pm = getSystemService(PowerManager::class.java)
+        if (pm?.isIgnoringBatteryOptimizations(packageName) == true) {
+            setStatus(getString(R.string.battery_opt_already_granted))
+            return
+        }
+        val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+            .setData(Uri.parse("package:$packageName"))
+        try {
+            startActivity(intent)
+        } catch (_: Exception) {
+            // Some OEMs strip the direct intent; fall back to the generic
+            // battery-optimisation list.
+            startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+        }
+    }
+
+    private fun refreshBatteryButton() {
+        val pm = getSystemService(PowerManager::class.java)
+        val exempt = pm?.isIgnoringBatteryOptimizations(packageName) == true
+        binding.batteryButton.isEnabled = !exempt
+        binding.batteryButton.text = if (exempt) {
+            getString(R.string.battery_opt_already_granted)
+        } else {
+            getString(R.string.disable_battery_opt)
+        }
     }
 
     private fun setStatus(text: String) {
