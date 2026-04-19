@@ -26,18 +26,30 @@ import android.util.Log
 class MoonPeripheralService : Service() {
 
     private val state = PhoneState()
-    private val handler = RequestHandler(state)
+    private lateinit var locations: LocationProvider
+    private lateinit var handler: RequestHandler
     private lateinit var gatt: MoonGattServer
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val positionTicker = object : Runnable {
         override fun run() {
-            if (state.positionSubscribed && state.paired && gatt.hasSubscribers()) {
-                gatt.notifySubscribers(handler.buildPositionEvent())
+            val shouldStream = state.positionSubscribed && state.paired && gatt.hasSubscribers()
+            if (shouldStream && !locationsStarted) {
+                locations.start(state.positionIntervalMs)
+                locationsStarted = true
+            } else if (!shouldStream && locationsStarted) {
+                locations.stop()
+                locationsStarted = false
+            }
+
+            if (shouldStream) {
+                handler.buildPositionEvent()?.let { gatt.notifySubscribers(it) }
             }
             mainHandler.postDelayed(this, state.positionIntervalMs)
         }
     }
+
+    private var locationsStarted = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -47,6 +59,8 @@ class MoonPeripheralService : Service() {
         ensureNotificationChannel()
         startForeground(NOTIFICATION_ID, buildForegroundNotification("Starting..."))
 
+        locations = LocationProvider(this)
+        handler = RequestHandler(state, locations)
         gatt = MoonGattServer(this) { payload -> handler.onRpcTxWrite(payload) }
         gatt.onStateChange = { status ->
             updateForegroundNotification(status)
@@ -72,6 +86,10 @@ class MoonPeripheralService : Service() {
 
     override fun onDestroy() {
         mainHandler.removeCallbacks(positionTicker)
+        if (locationsStarted) {
+            locations.stop()
+            locationsStarted = false
+        }
         gatt.stop()
         super.onDestroy()
     }
