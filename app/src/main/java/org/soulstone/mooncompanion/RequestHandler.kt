@@ -1,7 +1,6 @@
 package org.soulstone.mooncompanion
 
 import android.location.Location
-import android.util.Log
 import com.google.protobuf.ByteString
 import com.google.protobuf.InvalidProtocolBufferException
 import org.soulstone.mooncompanion.proto.FixQuality
@@ -38,11 +37,11 @@ class RequestHandler(
         val request = try {
             MoonRequest.parseFrom(payload)
         } catch (e: InvalidProtocolBufferException) {
-            Log.w(TAG, "Could not parse inbound MoonRequest: ${e.message}")
+            DebugLog.w(TAG, "Could not parse inbound MoonRequest: ${e.message}")
             return null
         }
 
-        Log.i(TAG, "RX request_id=${request.requestId} kind=${request.payloadCase}")
+        DebugLog.i(TAG, "RX request_id=${request.requestId} kind=${request.payloadCase}")
         val response = dispatch(request) ?: return null
         val envelope = MoonPhoneMessage.newBuilder().setResponse(response).build()
         return envelope.toByteArray()
@@ -84,7 +83,7 @@ class RequestHandler(
 
     private fun handlePair(req: MoonRequest): MoonResponse {
         val token = state.issueAuthToken()
-        Log.i(TAG, "Paired! Issued auth_token=${token.joinToString("") { "%02x".format(it) }}")
+        DebugLog.i(TAG, "Paired! Issued auth_token=${token.joinToString("") { "%02x".format(it) }}")
         return MoonResponse.newBuilder()
             .setRequestId(req.requestId)
             .setStatus(MoonStatus.MOON_OK)
@@ -119,7 +118,7 @@ class RequestHandler(
         state.positionSubscribed = true
         state.positionIntervalMs =
             req.subscribePosition.intervalMs.toLong().coerceAtLeast(500)
-        Log.i(TAG, "Position subscription on (interval=${state.positionIntervalMs}ms)")
+        DebugLog.i(TAG, "Position subscription on (interval=${state.positionIntervalMs}ms)")
         return MoonResponse.newBuilder()
             .setRequestId(req.requestId)
             .setStatus(MoonStatus.MOON_OK)
@@ -151,7 +150,7 @@ class RequestHandler(
 
     private fun handleSendNotification(req: MoonRequest): MoonResponse {
         val n = req.sendNotification
-        Log.i(TAG, "Flipper notification [${n.title}] ${n.body} priority=${n.priority}")
+        DebugLog.i(TAG, "Flipper notification [${n.title}] ${n.body} priority=${n.priority}")
         // Real POSTNotifications wiring comes with the notification milestone.
         return MoonResponse.newBuilder()
             .setRequestId(req.requestId)
@@ -164,7 +163,7 @@ class RequestHandler(
         val fix = locations.current() ?: return null
         val ageMs = System.currentTimeMillis() - fix.time
         if (ageMs > maxFixAgeMs) {
-            Log.d(TAG, "Skipping stale fix (age=${ageMs}ms)")
+            DebugLog.d(TAG, "Skipping stale fix (age=${ageMs}ms)")
             return null
         }
         return toProto(fix)
