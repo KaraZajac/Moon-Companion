@@ -26,6 +26,7 @@ class MoonPeripheralService : Service() {
 
     private val state = PhoneState()
     private lateinit var locations: LocationProvider
+    private lateinit var bulk: BulkChannelServer
     private lateinit var handler: RequestHandler
     private lateinit var gatt: MoonGattServer
 
@@ -59,7 +60,10 @@ class MoonPeripheralService : Service() {
         startForeground(NOTIFICATION_ID, buildForegroundNotification("Starting..."))
 
         locations = LocationProvider(this)
-        handler = RequestHandler(state, locations)
+        val btManager = getSystemService(android.bluetooth.BluetoothManager::class.java)
+        bulk = BulkChannelServer(btManager.adapter)
+        bulk.start()
+        handler = RequestHandler(state, locations, bulk)
         gatt = MoonGattServer(this) { payload -> handler.onRpcTxWrite(payload) }
         gatt.onStateChange = { status ->
             updateForegroundNotification(status)
@@ -89,6 +93,7 @@ class MoonPeripheralService : Service() {
             locations.stop()
             locationsStarted = false
         }
+        bulk.stop()
         gatt.stop()
         super.onDestroy()
     }
