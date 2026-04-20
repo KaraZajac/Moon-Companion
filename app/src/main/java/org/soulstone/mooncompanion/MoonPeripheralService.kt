@@ -5,12 +5,16 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.bluetooth.BluetoothDevice
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import androidx.core.content.ContextCompat
 
 /**
  * Foreground service that owns the peripheral lifetime. The UI lives in an
@@ -28,6 +32,7 @@ class MoonPeripheralService : Service() {
     private lateinit var locations: LocationProvider
     private lateinit var handler: RequestHandler
     private lateinit var gatt: MoonGattServer
+    private lateinit var tokenStore: BondedTokenStore
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val positionTicker = object : Runnable {
@@ -77,13 +82,21 @@ class MoonPeripheralService : Service() {
         ensureNotificationChannel()
         startForeground(NOTIFICATION_ID, buildForegroundNotification("Starting..."))
 
+        tokenStore = EncryptedBondedTokenStore(this)
         locations = LocationProvider(this)
-        handler = RequestHandler(this, state, locations)
-        gatt = MoonGattServer(this) { payload -> handler.onRpcTxWrite(payload) }
-        gatt.onStateChange = { status ->
-            updateForegroundNotification(status)
-            broadcastStatus(status)
-        }
+        handler = RequestHandler(this, state, locations, tokenStore)
+        gatt = MoonGattServer(this) { device, payload -> handler.onRpcTxWrite(device, payload) }
+        gatt.onStateChange = { status -> publishStatus(status) }
+
+        // Track OS-level bond transitions. We need this to keep PhoneState
+        // in sync with the Bluetooth stack — the bond is what makes re-
+        // pairing automatic, and the app-level auth token is keyed off it.
+        ContextCompat.registerReceiver(
+            this,
+            bondReceiver,
+            IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED),
+            ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -111,8 +124,40 @@ class MoonPeripheralService : Service() {
             locations.stop()
             locationsStarted = false
         }
+        try {
+            unregisterReceiver(bondReceiver)
+        } catch (_: IllegalArgumentException) {
+            // Receiver wasn't registered — harmless, e.g. onCreate threw.
+        }
         gatt.stop()
         super.onDestroy()
+    }
+
+    private val bondReceiver = object : BroadcastReceiver() {
+        override fun onReceive(ctx: Context?, intent: Intent?) {
+            if (intent?.action != BluetoothDevice.ACTION_BOND_STATE_CHANGED) return
+            val device: BluetoothDevice = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE) ?: return
+            val newState = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.ERROR)
+            val addr = device.address
+            when (newState) {
+                BluetoothDevice.BOND_BONDING -> {
+                    publishStatus("Bonding: $addr")
+                }
+                BluetoothDevice.BOND_BONDED -> {
+                    state.bondedAddress = addr
+                    publishStatus("Bonded: $addr")
+                }
+                BluetoothDevice.BOND_NONE -> {
+                    if (state.bondedAddress == addr) {
+                        state.bondedAddress = null
+                        state.resetPairing()
+                    }
+                    tokenStore.remove(addr)
+                    publishStatus("Bond removed: $addr")
+                }
+            }
+            DebugLog.i(TAG, "Bond state $addr -> $newState")
+        }
     }
 
     private fun ensureNotificationChannel() {
@@ -151,6 +196,11 @@ class MoonPeripheralService : Service() {
 
     private fun broadcastStatus(status: String) {
         sendBroadcast(Intent(BROADCAST_STATUS).setPackage(packageName).putExtra(EXTRA_STATUS, status))
+    }
+
+    private fun publishStatus(status: String) {
+        updateForegroundNotification(status)
+        broadcastStatus(status)
     }
 
     companion object {

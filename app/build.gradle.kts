@@ -48,6 +48,7 @@ dependencies {
     implementation("com.google.android.material:material:1.12.0")
     implementation("androidx.constraintlayout:constraintlayout:2.1.4")
     implementation("androidx.lifecycle:lifecycle-service:2.8.4")
+    implementation("androidx.security:security-crypto:1.1.0-alpha06")
     implementation("com.google.android.gms:play-services-location:21.3.0")
     implementation("com.google.protobuf:protobuf-javalite:3.25.3")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
