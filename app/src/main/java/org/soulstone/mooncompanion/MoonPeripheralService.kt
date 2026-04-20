@@ -49,6 +49,25 @@ class MoonPeripheralService : Service() {
         }
     }
 
+    /**
+     * PhoneStatus heartbeat ticker. Fires every HEARTBEAT_INTERVAL_MS while a
+     * paired Flipper is subscribed; gives the central an app-level keep-alive
+     * signal independent of BLE supervision timeout. Also surfaces battery /
+     * charging / network state that the Flipper UI can reflect.
+     */
+    private val heartbeatTicker = object : Runnable {
+        override fun run() {
+            if (state.paired && gatt.hasSubscribers()) {
+                try {
+                    gatt.notifySubscribers(handler.buildPhoneStatusEvent())
+                } catch (e: Exception) {
+                    DebugLog.w(TAG, "phone-status heartbeat failed: ${e.message}")
+                }
+            }
+            mainHandler.postDelayed(this, HEARTBEAT_INTERVAL_MS)
+        }
+    }
+
     private var locationsStarted = false
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -63,7 +82,7 @@ class MoonPeripheralService : Service() {
         val btManager = getSystemService(android.bluetooth.BluetoothManager::class.java)
         bulk = BulkChannelServer(btManager.adapter)
         bulk.start()
-        handler = RequestHandler(state, locations, bulk)
+        handler = RequestHandler(this, state, locations, bulk)
         gatt = MoonGattServer(this) { payload -> handler.onRpcTxWrite(payload) }
         gatt.onStateChange = { status ->
             updateForegroundNotification(status)
@@ -79,16 +98,19 @@ class MoonPeripheralService : Service() {
                 stopSelf()
             }
         }
-        // Kick the ticker. It self-guards on subscription state, so keeping
-        // it posted unconditionally is cheap and means SubscribePosition
-        // doesn't need to fight the handler.
+        // Kick the tickers. They self-guard on subscription / pairing
+        // state, so keeping them posted unconditionally is cheap and means
+        // SubscribePosition doesn't need to fight the handler.
         mainHandler.removeCallbacks(positionTicker)
         mainHandler.post(positionTicker)
+        mainHandler.removeCallbacks(heartbeatTicker)
+        mainHandler.postDelayed(heartbeatTicker, HEARTBEAT_INTERVAL_MS)
         return START_STICKY
     }
 
     override fun onDestroy() {
         mainHandler.removeCallbacks(positionTicker)
+        mainHandler.removeCallbacks(heartbeatTicker)
         if (locationsStarted) {
             locations.stop()
             locationsStarted = false
@@ -140,6 +162,11 @@ class MoonPeripheralService : Service() {
         private const val TAG = "MoonPeripheral"
         private const val CHANNEL_ID = "moon_companion"
         private const val NOTIFICATION_ID = 1
+        /** PhoneStatus heartbeat interval. 30s balances Doze-friendliness
+         *  (long enough to not wake the radio excessively) against Flipper-side
+         *  link-health detection (a silent link should be noticed within a
+         *  minute or two). */
+        private const val HEARTBEAT_INTERVAL_MS = 30_000L
 
         const val ACTION_START = "org.soulstone.mooncompanion.START"
         const val ACTION_STOP  = "org.soulstone.mooncompanion.STOP"

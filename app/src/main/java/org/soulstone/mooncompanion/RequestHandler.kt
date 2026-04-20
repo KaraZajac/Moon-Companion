@@ -1,6 +1,10 @@
 package org.soulstone.mooncompanion
 
+import android.content.Context
 import android.location.Location
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
+import android.os.BatteryManager
 import com.google.protobuf.ByteString
 import com.google.protobuf.InvalidProtocolBufferException
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
@@ -19,6 +23,7 @@ import org.soulstone.mooncompanion.proto.MoonStatus
 import org.soulstone.mooncompanion.proto.NotificationAck
 import org.soulstone.mooncompanion.proto.OpenBulkChannelResponse
 import org.soulstone.mooncompanion.proto.PairResponse
+import org.soulstone.mooncompanion.proto.PhoneStatus
 import org.soulstone.mooncompanion.proto.PositionData
 import org.soulstone.mooncompanion.proto.TimeData
 import java.io.IOException
@@ -37,6 +42,7 @@ import javax.net.ssl.SSLException
  * fabricating coordinates — the Flipper side decides how to show that.
  */
 class RequestHandler(
+    private val context: Context,
     private val state: PhoneState,
     private val locations: LocationProvider,
     private val bulk: BulkChannelServer,
@@ -68,6 +74,34 @@ class RequestHandler(
         val position = currentPositionOrNull() ?: return null
         state.positionTick += 1
         val event = MoonEvent.newBuilder().setPositionUpdate(position).build()
+        return MoonPhoneMessage.newBuilder().setEvent(event).build().toByteArray()
+    }
+
+    /**
+     * Build a PhoneStatus event. Emitted periodically as an app-level
+     * heartbeat — the Flipper can watch for these to detect a silently-dead
+     * link faster than BLE supervision timeout (which may be multiple
+     * seconds). battery_pct / charging read live from BatteryManager;
+     * has_network is a best-effort check against the active network's
+     * internet-validated capability.
+     */
+    fun buildPhoneStatusEvent(): ByteArray {
+        val bm = context.getSystemService(Context.BATTERY_SERVICE) as BatteryManager
+        val battery = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY).coerceIn(0, 100)
+        val charging = bm.isCharging
+
+        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val caps = cm.getNetworkCapabilities(cm.activeNetwork)
+        val hasNetwork = caps != null &&
+            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+
+        val status = PhoneStatus.newBuilder()
+            .setBatteryPct(battery)
+            .setCharging(charging)
+            .setHasNetwork(hasNetwork)
+            .build()
+        val event = MoonEvent.newBuilder().setPhoneStatus(status).build()
         return MoonPhoneMessage.newBuilder().setEvent(event).build().toByteArray()
     }
 
