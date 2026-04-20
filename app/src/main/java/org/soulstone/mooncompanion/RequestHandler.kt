@@ -11,7 +11,6 @@ import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import org.soulstone.mooncompanion.proto.BulkKind
 import org.soulstone.mooncompanion.proto.FixQuality
 import org.soulstone.mooncompanion.proto.HttpHeader
 import org.soulstone.mooncompanion.proto.HttpResponse
@@ -21,7 +20,6 @@ import org.soulstone.mooncompanion.proto.MoonRequest
 import org.soulstone.mooncompanion.proto.MoonResponse
 import org.soulstone.mooncompanion.proto.MoonStatus
 import org.soulstone.mooncompanion.proto.NotificationAck
-import org.soulstone.mooncompanion.proto.OpenBulkChannelResponse
 import org.soulstone.mooncompanion.proto.PairResponse
 import org.soulstone.mooncompanion.proto.PhoneStatus
 import org.soulstone.mooncompanion.proto.PositionData
@@ -45,7 +43,6 @@ class RequestHandler(
     private val context: Context,
     private val state: PhoneState,
     private val locations: LocationProvider,
-    private val bulk: BulkChannelServer,
 ) {
 
     /** How old a fix is allowed to be before we treat it as "no fix". */
@@ -120,8 +117,6 @@ class RequestHandler(
             MoonRequest.PayloadCase.UNSUBSCRIBE_POSITION -> handleUnsubscribePosition(req)
             MoonRequest.PayloadCase.GET_TIME             -> handleGetTime(req)
             MoonRequest.PayloadCase.SEND_NOTIFICATION    -> handleSendNotification(req)
-            MoonRequest.PayloadCase.OPEN_BULK_CHANNEL    -> handleOpenBulkChannel(req)
-            MoonRequest.PayloadCase.CLOSE_BULK_CHANNEL   -> handleCloseBulkChannel(req)
             MoonRequest.PayloadCase.HTTP                 -> handleHttp(req)
             else -> MoonResponse.newBuilder()
                 .setRequestId(req.requestId)
@@ -197,57 +192,17 @@ class RequestHandler(
             .build()
     }
 
-    private fun handleOpenBulkChannel(req: MoonRequest): MoonResponse {
-        val r = req.openBulkChannel
-        val psm = bulk.psm
-        if (psm <= 0) {
-            DebugLog.w(TAG, "OpenBulkChannel: server socket not ready")
-            return MoonResponse.newBuilder()
-                .setRequestId(req.requestId)
-                .setStatus(MoonStatus.MOON_NOT_AVAILABLE)
-                .build()
-        }
-        val kind = when (r.kind) {
-            BulkKind.BULK_DOWNLOAD_FAP    -> BulkChannelServer.BulkKindLocal.DOWNLOAD_FAP
-            BulkKind.BULK_UPLOAD_FILE     -> BulkChannelServer.BulkKindLocal.UPLOAD_FILE
-            BulkKind.BULK_FIRMWARE_UPDATE -> BulkChannelServer.BulkKindLocal.FIRMWARE_UPDATE
-            BulkKind.BULK_ECHO_TEST       -> BulkChannelServer.BulkKindLocal.ECHO_TEST
-            else                          -> BulkChannelServer.BulkKindLocal.UNSPECIFIED
-        }
-        val session = bulk.beginSession(kind, r.name ?: "")
-        DebugLog.i(
-            TAG,
-            "Open bulk channel: kind=$kind name=${r.name} -> psm=$psm, bytes=${session.totalBytes}"
-        )
-        return MoonResponse.newBuilder()
-            .setRequestId(req.requestId)
-            .setStatus(MoonStatus.MOON_OK)
-            .setOpenBulkChannel(
-                OpenBulkChannelResponse.newBuilder()
-                    .setSpsm(psm)
-                    .setTotalBytes(session.totalBytes)
-                    .setSessionId(ByteString.copyFrom(session.sessionId))
-            )
-            .build()
-    }
-
-    private fun handleCloseBulkChannel(req: MoonRequest): MoonResponse {
-        bulk.cancelSession(req.closeBulkChannel.sessionId.toByteArray())
-        return MoonResponse.newBuilder()
-            .setRequestId(req.requestId)
-            .setStatus(MoonStatus.MOON_OK)
-            .build()
-    }
-
     /**
      * Execute an HTTP(S) request through OkHttp and marshal the result.
      *
-     * v1 is inline-only: the response body must fit in a single GATT
+     * Inline-only: the response body must fit in a single GATT
      * notification alongside status code + headers (total envelope
      * ≤ ~180 B after protobuf + GATT framing). Anything larger returns
-     * MOON_NOT_AVAILABLE — FAPs needing large payloads should use the
-     * existing bulk-channel API (BULK_DOWNLOAD_FAP) directly. v1.1 will
-     * add automatic bulk streaming for oversize HTTP responses.
+     * MOON_NOT_AVAILABLE. There is no bulk-streaming fallback — our
+     * radio-stack variant doesn't support L2CAP Connection-Oriented
+     * Channels, and we don't do GATT-chunked reassembly on the firmware
+     * side yet, so large payloads are simply out of scope until the
+     * transport grows one of those.
      *
      * Runs synchronously on the caller's thread (typically a BLE GATT
      * server thread). OkHttp's read timeout bounds how long that thread
