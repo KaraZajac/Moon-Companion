@@ -32,7 +32,7 @@ import java.util.UUID
  */
 class MoonGattServer(
     private val context: Context,
-    private val onWrite: (ByteArray) -> ByteArray?,
+    private val onWrite: (BluetoothDevice, ByteArray) -> ByteArray?,
 ) {
     companion object {
         private const val TAG = "MoonGatt"
@@ -76,24 +76,30 @@ class MoonGattServer(
 
         val service = BluetoothGattService(SERVICE_UUID, BluetoothGattService.SERVICE_TYPE_PRIMARY)
 
+        // Encrypted permissions force Android's SMP to run on first read/
+        // write, which is what gets the Flipper into the OS-level bonded
+        // list. Just-Works (no MITM variant) — the Flipper has no display
+        // or keyboard IO capability to satisfy MITM-protected pairing.
         val tx = BluetoothGattCharacteristic(
             RPC_TX_UUID,
             BluetoothGattCharacteristic.PROPERTY_WRITE or
                 BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE,
-            BluetoothGattCharacteristic.PERMISSION_WRITE,
+            BluetoothGattCharacteristic.PERMISSION_WRITE_ENCRYPTED,
         )
 
         val rx = BluetoothGattCharacteristic(
             RPC_RX_UUID,
             BluetoothGattCharacteristic.PROPERTY_NOTIFY or
                 BluetoothGattCharacteristic.PROPERTY_READ,
-            BluetoothGattCharacteristic.PERMISSION_READ,
+            BluetoothGattCharacteristic.PERMISSION_READ_ENCRYPTED,
         )
+        // CCCD must also require encryption; otherwise a central can flip
+        // notifications on without triggering SMP on some stacks.
         rx.addDescriptor(
             BluetoothGattDescriptor(
                 CCC_UUID,
-                BluetoothGattDescriptor.PERMISSION_READ or
-                    BluetoothGattDescriptor.PERMISSION_WRITE,
+                BluetoothGattDescriptor.PERMISSION_READ_ENCRYPTED or
+                    BluetoothGattDescriptor.PERMISSION_WRITE_ENCRYPTED,
             )
         )
         service.addCharacteristic(tx)
@@ -176,7 +182,15 @@ class MoonGattServer(
             )
             if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 subscribers.remove(device)
-                onStateChange?.invoke("Advertising")
+                // status 34 = GATT_INSUFFICIENT_ENCRYPTION. Seen when the
+                // central tried to read/write before SMP ran — the central
+                // doesn't support bonding. Surface a diagnostic message so
+                // the user knows to upgrade the Flipper side.
+                if (status == 34) {
+                    onStateChange?.invoke("Encryption failed — update Flipper firmware")
+                } else {
+                    onStateChange?.invoke("Advertising")
+                }
             } else if (newState == BluetoothProfile.STATE_CONNECTED) {
                 onStateChange?.invoke("Connected: ${device.address}")
             }
@@ -199,7 +213,7 @@ class MoonGattServer(
                         "(first=${value.take(8).joinToString("") { "%02x".format(it) }})"
                 )
                 val reply = try {
-                    onWrite(value)
+                    onWrite(device, value)
                 } catch (e: Exception) {
                     DebugLog.e(TAG, "onWrite threw: ${e.message}", e)
                     null
