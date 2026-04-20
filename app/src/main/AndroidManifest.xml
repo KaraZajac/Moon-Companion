@@ -37,6 +37,12 @@
          Doze eventually throttles BLE advertising + location updates. -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
+    <!-- HTTP proxy: every FAP on the paired Flipper issues HTTP requests
+         through this app. Full Internet access is required; the BLE pairing
+         is the trust boundary. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"

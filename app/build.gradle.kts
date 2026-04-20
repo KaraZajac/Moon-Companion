@@ -50,6 +50,7 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-service:2.8.4")
     implementation("com.google.android.gms:play-services-location:21.3.0")
     implementation("com.google.protobuf:protobuf-javalite:3.25.3")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
