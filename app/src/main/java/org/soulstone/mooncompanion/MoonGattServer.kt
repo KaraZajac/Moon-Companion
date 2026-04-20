@@ -93,13 +93,21 @@ class MoonGattServer(
                 BluetoothGattCharacteristic.PROPERTY_READ,
             BluetoothGattCharacteristic.PERMISSION_READ_ENCRYPTED,
         )
-        // CCCD must also require encryption; otherwise a central can flip
-        // notifications on without triggering SMP on some stacks.
+        // CCCD stays UN-encrypted on purpose. The BlueNRG stack on the
+        // Flipper (our canonical central) writes to the CCCD right after
+        // service discovery, before it's had a chance to activate link
+        // encryption post-pair — with encrypted CCCD permissions Android
+        // rejects that write with INSUFFICIENT_ENCRYPTION (ATT 0x0F,
+        // seen as BLE_STATUS_FAILED 0x91 in the Flipper logs), and the
+        // state machine hangs waiting for a subscribe-complete event
+        // that never comes. Keep the actual data path (RPC_TX writes,
+        // RPC_RX reads + notifications) encrypted — that's what enforces
+        // pairing; the CCCD just toggles whether notifications flow.
         rx.addDescriptor(
             BluetoothGattDescriptor(
                 CCC_UUID,
-                BluetoothGattDescriptor.PERMISSION_READ_ENCRYPTED or
-                    BluetoothGattDescriptor.PERMISSION_WRITE_ENCRYPTED,
+                BluetoothGattDescriptor.PERMISSION_READ or
+                    BluetoothGattDescriptor.PERMISSION_WRITE,
             )
         )
         service.addCharacteristic(tx)
