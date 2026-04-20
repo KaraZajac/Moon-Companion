@@ -44,6 +44,19 @@ class MoonGattServer(
         // Standard Client Characteristic Configuration descriptor — the
         // subscribe toggle that every notify-capable char needs.
         private val CCC_UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
+
+        // Chunk framing (kept in lockstep with Moon-Firmware's
+        // applications/services/moon_companion/moon_chunk.h).
+        // Every RPC_TX write + RPC_RX notification carries a 4-byte
+        // header: [magic, flags, offsetLo, offsetHi] followed by up to
+        // CHUNK_PAYLOAD_MAX bytes of protobuf. The LAST flag tells the
+        // receiver it's the final chunk of a message; single-notify
+        // messages arrive with offset=0 and LAST set.
+        private const val CHUNK_MAGIC: Byte = 0xEC.toByte()
+        private const val CHUNK_FLAG_LAST: Byte = 0x01
+        private const val CHUNK_HEADER_SIZE = 4
+        private const val CHUNK_PAYLOAD_MAX = 240
+        private const val CHUNK_REASSEMBLY_MAX = 8192
     }
 
     private val manager = context.getSystemService(BluetoothManager::class.java)
@@ -51,6 +64,13 @@ class MoonGattServer(
     private var advertiser: BluetoothLeAdvertiser? = null
     private var rxChar: BluetoothGattCharacteristic? = null
     private val subscribers = mutableSetOf<BluetoothDevice>()
+
+    // Inbound chunk reassembly. One slot per central address; the
+    // Flipper only ever opens one link but the map keeps us honest if
+    // a stray second central subscribes. Entries are dropped on
+    // disconnect and on any magic/bounds violation.
+    private data class Reasm(var buf: ByteArray, var len: Int)
+    private val reasm = HashMap<String, Reasm>()
 
     var onStateChange: ((String) -> Unit)? = null
 
@@ -154,15 +174,40 @@ class MoonGattServer(
     fun notifySubscribers(payload: ByteArray) {
         val server = server ?: return
         val rx = rxChar ?: return
-        rx.value = payload
-        for (device in subscribers.toList()) {
-            try {
-                server.notifyCharacteristicChanged(device, rx, /* confirm = */ false)
-                DebugLog.d(TAG, "notify ${payload.size} bytes -> ${device.address}")
-            } catch (e: SecurityException) {
-                DebugLog.w(TAG, "notify denied for ${device.address}: ${e.message}")
+        if (payload.isEmpty()) return
+
+        // Split into CHUNK_PAYLOAD_MAX-byte chunks with a 4-byte chunk
+        // header on each. Single-notification messages still get the
+        // header — the firmware expects the magic byte on every frame.
+        var offset = 0
+        val total = payload.size
+        while (offset < total) {
+            val remaining = total - offset
+            val take = if (remaining > CHUNK_PAYLOAD_MAX) CHUNK_PAYLOAD_MAX else remaining
+            val isLast = offset + take == total
+
+            val frame = ByteArray(CHUNK_HEADER_SIZE + take)
+            frame[0] = CHUNK_MAGIC
+            frame[1] = if (isLast) CHUNK_FLAG_LAST else 0
+            frame[2] = (offset and 0xFF).toByte()
+            frame[3] = ((offset shr 8) and 0xFF).toByte()
+            System.arraycopy(payload, offset, frame, CHUNK_HEADER_SIZE, take)
+
+            rx.value = frame
+            for (device in subscribers.toList()) {
+                try {
+                    server.notifyCharacteristicChanged(device, rx, /* confirm = */ false)
+                } catch (e: SecurityException) {
+                    DebugLog.w(TAG, "notify denied for ${device.address}: ${e.message}")
+                }
             }
+            offset += take
         }
+        DebugLog.d(
+            TAG,
+            "notify $total bytes in ${(total + CHUNK_PAYLOAD_MAX - 1) / CHUNK_PAYLOAD_MAX} chunk(s) " +
+                "-> ${subscribers.size} subscriber(s)"
+        )
     }
 
     fun hasSubscribers(): Boolean = subscribers.isNotEmpty()
@@ -190,6 +235,9 @@ class MoonGattServer(
             )
             if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 subscribers.remove(device)
+                // Drop any half-reassembled inbound frame — the peer
+                // will restart at offset 0 on the next connection.
+                reasm.remove(device.address)
                 // status 34 = GATT_INSUFFICIENT_ENCRYPTION. Seen when the
                 // central tried to read/write before SMP ran — the central
                 // doesn't support bonding. Surface a diagnostic message so
@@ -215,24 +263,87 @@ class MoonGattServer(
             value: ByteArray,
         ) {
             if (characteristic.uuid == RPC_TX_UUID) {
-                DebugLog.i(
-                    TAG,
-                    "RPC_TX write ${value.size} bytes from ${device.address} " +
-                        "(first=${value.take(8).joinToString("") { "%02x".format(it) }})"
-                )
-                val reply = try {
-                    onWrite(device, value)
-                } catch (e: Exception) {
-                    DebugLog.e(TAG, "onWrite threw: ${e.message}", e)
-                    null
+                // Every RPC_TX write carries the chunk header. Assemble
+                // until the LAST flag lands, then hand the decoded
+                // payload off to the RPC dispatcher. Magic-byte mismatch
+                // / bounds violations drop the in-flight message and
+                // log (the Flipper should always frame with 0xEC).
+                val assembled = acceptInboundChunk(device, value)
+                if (assembled != null) {
+                    DebugLog.i(
+                        TAG,
+                        "RPC_TX ${assembled.size} bytes from ${device.address} " +
+                            "(first=${assembled.take(8).joinToString("") { "%02x".format(it) }})"
+                    )
+                    val reply = try {
+                        onWrite(device, assembled)
+                    } catch (e: Exception) {
+                        DebugLog.e(TAG, "onWrite threw: ${e.message}", e)
+                        null
+                    }
+                    if (reply != null) notifySubscribers(reply)
                 }
-                if (reply != null) notifySubscribers(reply)
             } else {
                 DebugLog.d(TAG, "Unexpected write on ${characteristic.uuid}")
             }
             if (responseNeeded) {
                 server?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, null)
             }
+        }
+
+        /**
+         * Deposit a chunk into the per-device reassembly buffer and return
+         * the completed payload when the LAST flag arrives. Returns null
+         * while more chunks are expected or if the frame is malformed.
+         */
+        private fun acceptInboundChunk(device: BluetoothDevice, frame: ByteArray): ByteArray? {
+            if (frame.size < CHUNK_HEADER_SIZE) {
+                DebugLog.w(TAG, "chunk: runt ${frame.size} B dropped from ${device.address}")
+                return null
+            }
+            if (frame[0] != CHUNK_MAGIC) {
+                DebugLog.w(
+                    TAG,
+                    "chunk: bad magic 0x${"%02x".format(frame[0])} from ${device.address}; dropping"
+                )
+                reasm.remove(device.address)
+                return null
+            }
+            val isLast = (frame[1].toInt() and CHUNK_FLAG_LAST.toInt()) != 0
+            val off = (frame[2].toInt() and 0xFF) or ((frame[3].toInt() and 0xFF) shl 8)
+            val chunkLen = frame.size - CHUNK_HEADER_SIZE
+            val end = off + chunkLen
+            if (end > CHUNK_REASSEMBLY_MAX) {
+                DebugLog.e(
+                    TAG,
+                    "chunk: oversize msg $end B > $CHUNK_REASSEMBLY_MAX from ${device.address}; dropping"
+                )
+                reasm.remove(device.address)
+                return null
+            }
+
+            // Fast path: whole message in one notification.
+            if (off == 0 && isLast && reasm[device.address] == null) {
+                return frame.copyOfRange(CHUNK_HEADER_SIZE, frame.size)
+            }
+
+            val slot = reasm.getOrPut(device.address) {
+                Reasm(buf = ByteArray(maxOf(end, 1024)), len = 0)
+            }
+            if (slot.buf.size < end) {
+                var cap = slot.buf.size
+                while (cap < end) cap *= 2
+                if (cap > CHUNK_REASSEMBLY_MAX) cap = CHUNK_REASSEMBLY_MAX
+                slot.buf = slot.buf.copyOf(cap)
+            }
+            System.arraycopy(frame, CHUNK_HEADER_SIZE, slot.buf, off, chunkLen)
+            if (end > slot.len) slot.len = end
+
+            return if (isLast) {
+                val out = slot.buf.copyOf(slot.len)
+                reasm.remove(device.address)
+                out
+            } else null
         }
 
         @SuppressLint("MissingPermission")
