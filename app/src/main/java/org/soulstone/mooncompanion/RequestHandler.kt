@@ -1,5 +1,6 @@
 package org.soulstone.mooncompanion
 
+import android.bluetooth.BluetoothDevice
 import android.content.Context
 import android.location.Location
 import android.net.ConnectivityManager
@@ -43,12 +44,13 @@ class RequestHandler(
     private val context: Context,
     private val state: PhoneState,
     private val locations: LocationProvider,
+    private val tokenStore: BondedTokenStore,
 ) {
 
     /** How old a fix is allowed to be before we treat it as "no fix". */
     private val maxFixAgeMs: Long = 30_000L
 
-    fun onRpcTxWrite(payload: ByteArray): ByteArray? {
+    fun onRpcTxWrite(device: BluetoothDevice, payload: ByteArray): ByteArray? {
         val request = try {
             MoonRequest.parseFrom(payload)
         } catch (e: InvalidProtocolBufferException) {
@@ -57,7 +59,7 @@ class RequestHandler(
         }
 
         DebugLog.i(TAG, "RX request_id=${request.requestId} kind=${request.payloadCase}")
-        val response = dispatch(request) ?: return null
+        val response = dispatch(device, request) ?: return null
         val envelope = MoonPhoneMessage.newBuilder().setResponse(response).build()
         return envelope.toByteArray()
     }
@@ -102,10 +104,10 @@ class RequestHandler(
         return MoonPhoneMessage.newBuilder().setEvent(event).build().toByteArray()
     }
 
-    private fun dispatch(req: MoonRequest): MoonResponse? {
+    private fun dispatch(device: BluetoothDevice, req: MoonRequest): MoonResponse? {
         // PairRequest is the one unauthenticated request we honour.
         if (req.payloadCase == MoonRequest.PayloadCase.PAIR) {
-            return handlePair(req)
+            return handlePair(device, req)
         }
 
         val unauth = checkAuth(req)
@@ -125,9 +127,21 @@ class RequestHandler(
         }
     }
 
-    private fun handlePair(req: MoonRequest): MoonResponse {
-        val token = state.issueAuthToken()
-        DebugLog.i(TAG, "Paired! Issued auth_token=${token.joinToString("") { "%02x".format(it) }}")
+    private fun handlePair(device: BluetoothDevice, req: MoonRequest): MoonResponse {
+        // With the encrypted GATT permissions, any peer that got here has
+        // already completed SMP and is bonded. Reuse the stored token if
+        // we have one so reconnects don't invalidate the Flipper's saved
+        // auth; otherwise mint a fresh one and persist it keyed by the
+        // identity address.
+        val address = device.address
+        val existed = tokenStore.get(address) != null
+        val token = state.authTokenFor(address, tokenStore)
+        DebugLog.i(
+            TAG,
+            "Paired! ${if (existed) "reused" else "issued"} auth_token=" +
+                token.joinToString("") { "%02x".format(it) } +
+                " for $address",
+        )
         return MoonResponse.newBuilder()
             .setRequestId(req.requestId)
             .setStatus(MoonStatus.MOON_OK)
