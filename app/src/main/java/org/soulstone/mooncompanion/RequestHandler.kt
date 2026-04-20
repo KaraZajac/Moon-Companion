@@ -261,12 +261,21 @@ class RequestHandler(
                     .setStatusCode(response.code)
                     .setBody(ByteString.copyFrom(bodyBytes))
 
-                for (name in response.headers.names()) {
-                    for (value in response.headers.values(name)) {
-                        httpResp.addHeaders(
-                            HttpHeader.newBuilder().setKey(name).setValue(value)
-                        )
-                    }
+                // Only forward headers we explicitly find useful. A full
+                // OkHttp response set (Server, Date, CF-RAY, X-Cache, etc.)
+                // can easily tack 500+ bytes onto the envelope and push
+                // the whole MoonResponse past the ~200 B single-GATT-
+                // notification ceiling, which then fails protobuf decode
+                // on the Flipper side with "stream too short". Keep it
+                // to Content-Type; FAPs that need richer metadata can
+                // ask for it later when we have a real transport.
+                val contentTypeHeader = response.header("Content-Type")
+                if (contentTypeHeader != null) {
+                    httpResp.addHeaders(
+                        HttpHeader.newBuilder()
+                            .setKey("Content-Type")
+                            .setValue(contentTypeHeader.take(MAX_HEADER_VALUE_LEN))
+                    )
                 }
 
                 MoonResponse.newBuilder()
@@ -346,6 +355,10 @@ class RequestHandler(
          * and does no reassembly in v1. Leaves ~90 B for headers + envelope.
          */
         private const val MAX_INLINE_BODY = 150
+        /** Cap on Content-Type value length. Matches the nanopb
+         *  HttpHeader.value max_size on the firmware side (96) minus a
+         *  couple of bytes of margin. */
+        private const val MAX_HEADER_VALUE_LEN = 90
         private const val DEFAULT_HTTP_TIMEOUT_MS = 30_000L
     }
 }
