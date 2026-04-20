@@ -3,8 +3,14 @@ package org.soulstone.mooncompanion
 import android.location.Location
 import com.google.protobuf.ByteString
 import com.google.protobuf.InvalidProtocolBufferException
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.soulstone.mooncompanion.proto.BulkKind
 import org.soulstone.mooncompanion.proto.FixQuality
+import org.soulstone.mooncompanion.proto.HttpHeader
+import org.soulstone.mooncompanion.proto.HttpResponse
 import org.soulstone.mooncompanion.proto.MoonEvent
 import org.soulstone.mooncompanion.proto.MoonPhoneMessage
 import org.soulstone.mooncompanion.proto.MoonRequest
@@ -15,7 +21,10 @@ import org.soulstone.mooncompanion.proto.OpenBulkChannelResponse
 import org.soulstone.mooncompanion.proto.PairResponse
 import org.soulstone.mooncompanion.proto.PositionData
 import org.soulstone.mooncompanion.proto.TimeData
+import java.io.IOException
 import java.util.TimeZone
+import java.util.concurrent.TimeUnit
+import javax.net.ssl.SSLException
 
 /**
  * Parses an RPC_TX write from the Flipper, dispatches it, and returns a
@@ -79,6 +88,7 @@ class RequestHandler(
             MoonRequest.PayloadCase.SEND_NOTIFICATION    -> handleSendNotification(req)
             MoonRequest.PayloadCase.OPEN_BULK_CHANNEL    -> handleOpenBulkChannel(req)
             MoonRequest.PayloadCase.CLOSE_BULK_CHANNEL   -> handleCloseBulkChannel(req)
+            MoonRequest.PayloadCase.HTTP                 -> handleHttp(req)
             else -> MoonResponse.newBuilder()
                 .setRequestId(req.requestId)
                 .setStatus(MoonStatus.MOON_UNSUPPORTED_REQUEST)
@@ -195,6 +205,105 @@ class RequestHandler(
             .build()
     }
 
+    /**
+     * Execute an HTTP(S) request through OkHttp and marshal the result.
+     *
+     * v1 is inline-only: the response body must fit in a single GATT
+     * notification alongside status code + headers (total envelope
+     * ≤ ~180 B after protobuf + GATT framing). Anything larger returns
+     * MOON_NOT_AVAILABLE — FAPs needing large payloads should use the
+     * existing bulk-channel API (BULK_DOWNLOAD_FAP) directly. v1.1 will
+     * add automatic bulk streaming for oversize HTTP responses.
+     *
+     * Runs synchronously on the caller's thread (typically a BLE GATT
+     * server thread). OkHttp's read timeout bounds how long that thread
+     * can be parked.
+     */
+    private fun handleHttp(req: MoonRequest): MoonResponse {
+        val h = req.http
+        val method = h.method.ifEmpty { "GET" }.uppercase()
+        val url = h.url
+        if (url.isEmpty()) {
+            DebugLog.w(TAG, "http: empty URL")
+            return httpFailure(req, MoonStatus.MOON_NOT_AVAILABLE)
+        }
+
+        val timeoutMs = if (h.timeoutMs > 0) h.timeoutMs.toLong() else DEFAULT_HTTP_TIMEOUT_MS
+        val client = OkHttpClient.Builder()
+            .connectTimeout(timeoutMs, TimeUnit.MILLISECONDS)
+            .readTimeout(timeoutMs, TimeUnit.MILLISECONDS)
+            .writeTimeout(timeoutMs, TimeUnit.MILLISECONDS)
+            .callTimeout(timeoutMs + 5_000, TimeUnit.MILLISECONDS)
+            .build()
+
+        val contentType = h.headersList
+            .firstOrNull { it.key.equals("Content-Type", ignoreCase = true) }
+            ?.value?.toMediaTypeOrNull()
+        val body = when {
+            h.body.size() == 0 -> null
+            else -> h.body.toByteArray().toRequestBody(contentType)
+        }
+
+        val builder = Request.Builder().url(url).method(method, body)
+        for (hdr in h.headersList) {
+            // OkHttp rejects headers with control characters; skip silently.
+            try {
+                builder.addHeader(hdr.key, hdr.value)
+            } catch (_: IllegalArgumentException) {
+                DebugLog.w(TAG, "http: dropped invalid header ${hdr.key}")
+            }
+        }
+
+        DebugLog.i(TAG, "http: $method $url timeout=${timeoutMs}ms")
+
+        return try {
+            client.newCall(builder.build()).execute().use { response ->
+                val bodyBytes = response.body?.bytes() ?: ByteArray(0)
+                if (bodyBytes.size > MAX_INLINE_BODY) {
+                    DebugLog.w(
+                        TAG,
+                        "http: response body ${bodyBytes.size} B > ${MAX_INLINE_BODY} B inline cap — " +
+                            "use bulk-channel for large downloads (v1.1 will auto-bulk)"
+                    )
+                    return httpFailure(req, MoonStatus.MOON_NOT_AVAILABLE)
+                }
+
+                val httpResp = HttpResponse.newBuilder()
+                    .setStatusCode(response.code)
+                    .setBody(ByteString.copyFrom(bodyBytes))
+
+                for (name in response.headers.names()) {
+                    for (value in response.headers.values(name)) {
+                        httpResp.addHeaders(
+                            HttpHeader.newBuilder().setKey(name).setValue(value)
+                        )
+                    }
+                }
+
+                MoonResponse.newBuilder()
+                    .setRequestId(req.requestId)
+                    .setStatus(MoonStatus.MOON_OK)
+                    .setHttp(httpResp)
+                    .build()
+            }
+        } catch (e: SSLException) {
+            DebugLog.w(TAG, "http: TLS failure for $url: ${e.message}")
+            httpFailure(req, MoonStatus.MOON_NOT_AVAILABLE)
+        } catch (e: IOException) {
+            DebugLog.w(TAG, "http: IO failure for $url: ${e.message}")
+            httpFailure(req, MoonStatus.MOON_NOT_AVAILABLE)
+        } catch (e: IllegalArgumentException) {
+            DebugLog.w(TAG, "http: invalid request ($method $url): ${e.message}")
+            httpFailure(req, MoonStatus.MOON_NOT_AVAILABLE)
+        }
+    }
+
+    private fun httpFailure(req: MoonRequest, status: MoonStatus): MoonResponse =
+        MoonResponse.newBuilder()
+            .setRequestId(req.requestId)
+            .setStatus(status)
+            .build()
+
     private fun handleSendNotification(req: MoonRequest): MoonResponse {
         val n = req.sendNotification
         DebugLog.i(TAG, "Flipper notification [${n.title}] ${n.body} priority=${n.priority}")
@@ -241,5 +350,13 @@ class RequestHandler(
 
     companion object {
         private const val TAG = "MoonHandler"
+        /**
+         * Conservative inline cap on HTTP response body. Total MoonResponse
+         * envelope (status + headers + body) must fit in one GATT
+         * notification; the Flipper-side transport rejects payloads > 244 B
+         * and does no reassembly in v1. Leaves ~90 B for headers + envelope.
+         */
+        private const val MAX_INLINE_BODY = 150
+        private const val DEFAULT_HTTP_TIMEOUT_MS = 30_000L
     }
 }
